@@ -32,7 +32,6 @@
 #include "py/mphal.h"
 #include "extmod/machine_pulse.h"
 
-#include "drivers/dht/dht9x.h"
 
 #define DHT9X_NOACK           (0x00)
 #define DHT9X_ACK             (0x01)
@@ -108,19 +107,23 @@ STATIC uint8_t dht9x_bus_write_byte(mp_dht9x_t self, uint8_t value)
 
     mp_uint_t irq_state = mp_hal_quiet_timing_enter();
 
-    for (int i=0x80; i>0; i/=2) {
-        mp_hal_pin_write(self.sda, i & value);
+    for (int8_t i=0x80; i>0; i/=2) {
+        if (i & value) {
+            mp_hal_pin_write(self.sda, 1);
+        } else {
+            mp_hal_pin_write(self.sda, 0);
+        }
         mp_hal_pin_write(self.sck, 1);
         mp_hal_delay_us_fast(3);
         mp_hal_pin_write(self.sck, 0);
     }
 
-    mp_hal_quiet_timing_exit(irq_state);
-
     mp_hal_pin_write(self.sda, 1);
     mp_hal_pin_write(self.sck, 1);
     error = mp_hal_pin_read(self.sda);
     mp_hal_pin_write(self.sck, 0);
+
+    mp_hal_quiet_timing_exit(irq_state);
 
     return error;
 }
@@ -132,7 +135,7 @@ STATIC int8_t dht9x_bus_read_byte(mp_dht9x_t self, uint8_t ack)
     mp_hal_pin_write(self.sda, 1);
     mp_uint_t irq_state = mp_hal_quiet_timing_enter();
 
-    for (int i=0x80; i>0; i/=2) {
+    for (int8_t i=0x80; i>0; i/=2) {
         mp_hal_pin_write(self.sck, 1);
         if (mp_hal_pin_read(self.sda)) {
             value = value | i;
@@ -142,7 +145,7 @@ STATIC int8_t dht9x_bus_read_byte(mp_dht9x_t self, uint8_t ack)
 
     mp_hal_pin_write(self.sda, !ack);
     mp_hal_pin_write(self.sck, 1);
-    mp_hal_delay_us(5);
+    mp_hal_delay_us_fast(5);
     mp_hal_pin_write(self.sck, 0);
     mp_hal_pin_write(self.sda, 1);
 
@@ -244,9 +247,9 @@ uint8_t dht9x_measure(mp_dht9x_t dht9x, uint8_t *p_value, uint8_t *p_checksum, u
         error += 1;
     }
 
-    *(p_value)   = dht9x_bus_read_byte(dht9x, DHT9X_ACK);    //read the first byte (MSB)
-    *(p_value+1) = dht9x_bus_read_byte(dht9x, DHT9X_ACK);    //read the second byte (LSB)
-    *p_checksum  = dht9x_bus_read_byte(dht9x, DHT9X_NOACK);  //read checksum
+    *(p_value + 0) = dht9x_bus_read_byte(dht9x, DHT9X_ACK);    //read the first byte (MSB)
+    *(p_value + 1) = dht9x_bus_read_byte(dht9x, DHT9X_ACK);    //read the second byte (LSB)
+    *p_checksum  = dht9x_bus_read_byte(dht9x, DHT9X_NOACK);    //read checksum
 
     return error;
 }
@@ -328,18 +331,28 @@ STATIC mp_obj_t dht9x_measure_temp(mp_obj_t pin_sck, mp_obj_t pin_sda, mp_obj_t 
     dht9x.sck = mp_hal_get_pin_obj(pin_sck);
     dht9x.sda = mp_hal_get_pin_obj(pin_sda);
     
+    mp_hal_pin_output(dht9x.sck);
+    mp_hal_pin_open_drain(dht9x.sda);
+
     mp_buffer_info_t bufinfo;
     mp_get_buffer_raise(buf_in, &bufinfo, MP_BUFFER_WRITE);
     if (bufinfo.len < 3) {
         mp_raise_ValueError("buffer too small");
     }
 
-    error = dht9x_measure(dht9x, (uint8_t*)&temp_val.i, &checksum, TEMP);
-    temp_val.f = (((float)temp_val.i)*0.01 - 40)*100;
-
+    uint8_t buf[2] = {0x00};
     uint8_t *pbuf = bufinfo.buf;
-    *(pbuf + 0) = ((uint16_t)(temp_val.f * 100) >> 8) & 0xFF;
-    *(pbuf + 1) = ((uint16_t)(temp_val.f * 100) >> 0) & 0xFF;
+
+    dht9x_bus_connectionreset(dht9x);
+    error = dht9x_measure(dht9x, buf, &checksum, TEMP);
+
+    temp_val.i = buf[0]*256 + buf[1];
+    temp_val.f = (((float)temp_val.i)*0.01 - 40)*100;
+    printf("Temperature = %d\r\n", buf[0]*256 + buf[1]);
+    printf("Temperature = %f\r\n", (double)temp_val.f);
+    
+    *(pbuf + 0) = buf[0];
+    *(pbuf + 1) = buf[1];
     *(pbuf + 2) = checksum;
 
     return MP_OBJ_NEW_SMALL_INT(error);
@@ -362,6 +375,7 @@ STATIC mp_obj_t dht9x_measure_humi(mp_obj_t pin_sck, mp_obj_t pin_sda, mp_obj_t 
         mp_raise_ValueError("buffer too small");
     }
 
+    dht9x_bus_connectionreset(dht9x);
     error += dht9x_measure(dht9x, (uint8_t*)&temp_val.i, &checksum, TEMP);
     error += dht9x_measure(dht9x, (uint8_t*)&humi_val.i, &checksum, HUMI);
 
@@ -455,6 +469,6 @@ EXTMOD_SRC_C = $(addprefix extmod/,\
 [Used]
 >>> import dht9x
 >>> buf = bytearray(6)
->>> dht9x.readinto('A0', 'A1', buf)
-
+>>> dht9x.readinto('C0', 'C1', buf)
+>>> dht9x.temp('C0', 'C1', buf)
 */
