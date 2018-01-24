@@ -57,7 +57,7 @@ enum {TEMP, HUMI};
 
 // Generates a transmission start 
 //       _____         ________
-// DATA:      |_______|
+// SDA :      |_______|
 //           ___     ___
 // SCK : ___|   |___|   |______
 
@@ -74,7 +74,7 @@ STATIC void _sht1x_bus_transstart(mp_obj_sht1x_t *self)
     mp_hal_pin_write(self->pin_sda, 0);
     mp_hal_delay_us_fast(1);
     mp_hal_pin_write(self->pin_sck, 0);
-    mp_hal_delay_us_fast(3);
+    mp_hal_delay_us_fast(5);
     mp_hal_pin_write(self->pin_sck, 1);
     mp_hal_delay_us_fast(1);
     mp_hal_pin_write(self->pin_sda, 1);
@@ -84,13 +84,18 @@ STATIC void _sht1x_bus_transstart(mp_obj_sht1x_t *self)
     mp_hal_quiet_timing_exit(irq_state);
 }
 
+// Communication reset: DATA-line=1 and at least 9 SCK cycles followed by transstart
+//       _____________________________________________________         ________
+// SDA :                                                      |_______|
+//          _    _    _    _    _    _    _    _    _        ___     ___
+// SCK : __| |__| |__| |__| |__| |__| |__| |__| |__| |______|   |___|   |______
 STATIC void _sht1x_bus_connectionreset(mp_obj_sht1x_t *self)
 {
     mp_hal_pin_write(self->pin_sda, 1);
     mp_hal_pin_write(self->pin_sck, 0);
 
     mp_uint_t irq_state = mp_hal_quiet_timing_enter();
-    for (int i=0; i<9; i++) {
+    for (uint8_t i=0; i<9; i++) {
         mp_hal_pin_write(self->pin_sck, 1);
         mp_hal_pin_write(self->pin_sck, 0);
     }
@@ -99,41 +104,46 @@ STATIC void _sht1x_bus_connectionreset(mp_obj_sht1x_t *self)
     _sht1x_bus_transstart(self);
 }
 
+//Writes a byte on the Sensibus and checks the acknowledge 
 STATIC uint8_t _sht1x_bus_write_byte(mp_obj_sht1x_t *self, uint8_t value)
 {
     uint8_t error = 0;
 
     mp_uint_t irq_state = mp_hal_quiet_timing_enter();
 
-    for (int8_t i=0x80; i>0; i/=2) {
+    for (uint8_t i=0x80; i>0; i/=2) {
         if (i & value) {
             mp_hal_pin_write(self->pin_sda, 1);
         } else {
             mp_hal_pin_write(self->pin_sda, 0);
         }
+        mp_hal_delay_us_fast(1);            // Observe setup time 
         mp_hal_pin_write(self->pin_sck, 1);
-        mp_hal_delay_us_fast(3);
+        mp_hal_delay_us_fast(5);
         mp_hal_pin_write(self->pin_sck, 0);
+        mp_hal_delay_us_fast(1);            // Observe hold time
     }
 
     mp_hal_pin_write(self->pin_sda, 1);
+    mp_hal_delay_us_fast(1);                // Observe setup time
     mp_hal_pin_write(self->pin_sck, 1);
     error = mp_hal_pin_read(self->pin_sda);
     mp_hal_pin_write(self->pin_sck, 0);
 
     mp_hal_quiet_timing_exit(irq_state);
 
-    return error;
+    return error;       //error=1 in case of no acknowledge
 }
 
-STATIC int8_t _sht1x_bus_read_byte(mp_obj_sht1x_t *self, uint8_t ack)
+// Reads a byte form the Sensibus and gives an acknowledge in case of "ack=1"
+STATIC uint8_t _sht1x_bus_read_byte(mp_obj_sht1x_t *self, uint8_t ack)
 {
-    int8_t value = 0;
+    uint8_t value = 0;
 
     mp_hal_pin_write(self->pin_sda, 1);
     mp_uint_t irq_state = mp_hal_quiet_timing_enter();
 
-    for (int8_t i=0x80; i>0; i/=2) {
+    for (uint8_t i=0x80; i>0; i/=2) {
         mp_hal_pin_write(self->pin_sck, 1);
         if (mp_hal_pin_read(self->pin_sda)) {
             value = value | i;
@@ -142,9 +152,11 @@ STATIC int8_t _sht1x_bus_read_byte(mp_obj_sht1x_t *self, uint8_t ack)
     }
 
     mp_hal_pin_write(self->pin_sda, !ack);
+    mp_hal_delay_us_fast(1);
     mp_hal_pin_write(self->pin_sck, 1);
     mp_hal_delay_us_fast(5);
     mp_hal_pin_write(self->pin_sck, 0);
+    mp_hal_delay_us_fast(1);
     mp_hal_pin_write(self->pin_sda, 1);
 
     mp_hal_quiet_timing_exit(irq_state);
@@ -217,7 +229,7 @@ STATIC uint8_t _sht1x_measure(mp_obj_sht1x_t *self, uint8_t *p_value, uint8_t mo
         }
     }
 
-    if(mp_hal_pin_read(self->pin_sda)) {
+    if (mp_hal_pin_read(self->pin_sda)) {
         error += 1;
     }
 
@@ -270,17 +282,24 @@ STATIC mp_obj_t mp_sht1x_make_new(const mp_obj_type_t *type, size_t n_args, size
     sht1x->pin_sck = mp_hal_get_pin_obj(args[0]);
     sht1x->pin_sda = mp_hal_get_pin_obj(args[1]);
 
+    mp_hal_gpio_clock_enable(sht1x->pin_sck->gpio);
+    mp_hal_gpio_clock_enable(sht1x->pin_sda->gpio);
+
     // init the pins to be push/pull outputs
     mp_hal_pin_output(sht1x->pin_sck);
     mp_hal_pin_open_drain(sht1x->pin_sda);
 
+    // mp_hal_pin_config(sht1x->pin_sck, MP_HAL_PIN_MODE_OUTPUT, MP_HAL_PIN_PULL_UP, 0);
+    // mp_hal_pin_config(sht1x->pin_sda, MP_HAL_PIN_MODE_OPEN_DRAIN, MP_HAL_PIN_PULL_NONE, 0);
+    mp_hal_delay_ms(250);
+    _sht1x_bus_connectionreset(sht1x);
     return sht1x;
 }
 
 // Resets the sensor by a softreset 
 STATIC mp_obj_t sht1x_softreset(mp_obj_t self_in) {
  
-    int8_t error = 0;
+    uint8_t error = 0;
     mp_obj_sht1x_t *self = MP_OBJ_TO_PTR(self_in);
 
     _sht1x_bus_connectionreset(self);
@@ -345,8 +364,7 @@ STATIC mp_obj_t sht1x_measure_temp(mp_obj_t self_in, mp_obj_t buf_in) {
     }
     uint8_t *pbuf = bufinfo.buf;
 
-    _sht1x_bus_connectionreset(self);
-
+    _sht1x_bus_transstart(self);
     error = _sht1x_bus_write_byte(self, SHT1X_MEASURE_REG_TEMP);
 
     for (int i=0; i<65535; i++) {
@@ -385,8 +403,7 @@ STATIC mp_obj_t sht1x_measure_humi(mp_obj_t self_in, mp_obj_t buf_in) {
     }
     uint8_t *pbuf = bufinfo.buf;
 
-    _sht1x_bus_connectionreset(self);
-
+    _sht1x_bus_transstart(self);
     error = _sht1x_bus_write_byte(self, SHT1X_MEASURE_REG_HUMI);
 
     for (int i=0; i<65535; i++) {
@@ -427,9 +444,8 @@ STATIC mp_obj_t sht1x_readinto(mp_obj_t self_in, mp_obj_t buf_in) {
     
     unsigned short temp_val = 0, humi_val = 0;
 
-    _sht1x_bus_connectionreset(self);
-    error += _sht1x_measure(self, (unsigned char *)&temp_val, TEMP);
-    error += _sht1x_measure(self, (unsigned char *)&humi_val, HUMI);
+    error += _sht1x_measure(self, (uint8_t *)&temp_val, TEMP);
+    error += _sht1x_measure(self, (uint8_t *)&humi_val, HUMI);
 
     float temperature = 0.0, humidity = 0.0;
     _sht1x_calc_humi_temp(&humidity, &temperature);
@@ -438,10 +454,10 @@ STATIC mp_obj_t sht1x_readinto(mp_obj_t self_in, mp_obj_t buf_in) {
     printf("Humi = %f\r\n", (double)humidity);
 
 
-    ((unsigned char*)bufinfo.buf)[0] = (short)(temperature*100) & 0xFF;
-    ((unsigned char*)bufinfo.buf)[1] = (short)(temperature*100) / 256;
-    ((unsigned char*)bufinfo.buf)[2] = (short)(humidity*100) & 0xFF;
-    ((unsigned char*)bufinfo.buf)[3] = (short)(humidity*100) / 256;
+    ((uint8_t *)bufinfo.buf)[0] = (short)(temperature*100) & 0xFF;
+    ((uint8_t *)bufinfo.buf)[1] = (short)(temperature*100) / 256;
+    ((uint8_t *)bufinfo.buf)[2] = (short)(humidity*100) & 0xFF;
+    ((uint8_t *)bufinfo.buf)[3] = (short)(humidity*100) / 256;
 
     return MP_OBJ_NEW_SMALL_INT(error);
 }
