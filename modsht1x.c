@@ -526,7 +526,7 @@ STATIC mp_obj_t sht1x_measure_humi(mp_obj_t self_in, mp_obj_t buf_in) {
 
     checksum   = _sht1x_bus_read_byte(self, SHT1X_NOACK);
 
-    error += _sht1x_check_crc8(SHT1X_MEASURE_REG_TEMP, checksum, pbuf[0]*256 + pbuf[1]);
+    error += _sht1x_check_crc8(SHT1X_MEASURE_REG_HUMI, checksum, pbuf[0]*256 + pbuf[1]);
 
     // return mp_obj_new_float((p_value[0]*256 + p_value[1])/100);
     return MP_OBJ_NEW_SMALL_INT(error);
