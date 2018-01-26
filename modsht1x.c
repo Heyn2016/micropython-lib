@@ -47,24 +47,29 @@
 #define SHT1X_MEASURE_REG_HUMI      (0x05)    //000   0010    1
 #define SHT1X_RESET                 (0x1E)    //000   1111    0
 
-#define TEMP_8BIT_HUMI_12BIT        (0x01)
-#define TEMP_12BIT_HUMI_14BIT       (0x00)    //Default
+#define TEMP_14BIT                  (0x00)
+#define TEMP_12BIT                  (0x01)
+#define HUMI_12BIT                  (0x00)
+#define HUMI_8BIT                   (0x01)
+
+enum _SHT1X_VDD {
+    VDD_5D0V = 1,       // VDD = 5.0V
+    VDD_4D0V,           // VDD = 4.0V
+    VDD_3D5V,           // VDD = 3.5V
+    VDD_3D0V,           // VDD = 3.0V
+    VDD_2D5V,           // VDD = 2.5V
+    VDD_MAX
+};
 
 typedef struct _mp_obj_sht1x_t {
     mp_obj_base_t base;
+    uint32_t vdd_value;
     uint32_t us_timeout;
     mp_hal_pin_obj_t pin_sda;
     mp_hal_pin_obj_t pin_sck;
 } mp_obj_sht1x_t;
 
 enum {TEMP, HUMI};
-
-
-// STATIC void mp_hal_sht1x_delay(mp_obj_sht1x_t *self) {
-//     // We need to use an accurate delay to get acceptable SHT1X
-//     // speeds (eg 1us should be not much more than 1us).
-//     mp_hal_delay_us_fast(self->us_delay);
-// }
 
 STATIC void mp_hal_sht1x_sck_low(mp_obj_sht1x_t *self) {
     mp_hal_pin_od_low(self->pin_sck);
@@ -265,27 +270,16 @@ STATIC uint8_t _sht1x_measure(mp_obj_sht1x_t *self, uint8_t *p_value, uint8_t mo
         default     : break;
     }
 
-#if 0
-    // for (size_t i=0; i<self->us_timeout; i++) {
-    //     if (mp_hal_sht1x_sda_read(self) == 0x00) {
-    //         break;
-    //     } else {
-    //         mp_hal_delay_us_fast(1);
-    //     }
-    // }
-    // if (mp_hal_sht1x_sda_read(self)) {
-    //     error += 1;
-    // }
-#else
-    mp_uint_t ticks = mp_hal_ticks_us();
-    while (mp_hal_sht1x_sda_read(self) != 0) {
-        if ((mp_uint_t)(mp_hal_ticks_us() - ticks) > self->us_timeout) {
-            error += 1;
-            mp_raise_OSError(MP_ETIMEDOUT);
+    for (size_t i=0; i<self->us_timeout; i++) {
+        if (mp_hal_sht1x_sda_read(self) == 0x00) {
+            break;
+        } else {
+            mp_hal_delay_us_fast(1);
         }
     }
-#endif
-
+    if (mp_hal_sht1x_sda_read(self)) {
+        error += 1;
+    }
 
     *(p_value + 1) = _sht1x_bus_read_byte(self, SHT1X_ACK);    //read the first byte (MSB) (little endian)
     *(p_value + 0) = _sht1x_bus_read_byte(self, SHT1X_ACK);    //read the second byte (LSB)
@@ -302,24 +296,24 @@ STATIC uint8_t _sht1x_measure(mp_obj_sht1x_t *self, uint8_t *p_value, uint8_t mo
 
 /*
     VDD     d1(C)   d1(F)    SOt     d2(C)   d2(F)
-    5V     -40.1   -40.2    14bit    0.01    0.018
-    4V     -39.8   -39.6    12bit    0.04    0.072
-    3.5V    -39.7   -39.5
-    3V     -39.6   -39.3
-    2.5V    -39.4   -38.9
+    5V     -40.0   -40.0    14bit    0.01    0.018
+    4V     -39.75  -39.5    12bit    0.04    0.072
+    3.5V   -39.66  -39.35
+    3V     -39.6   -39.28
+    2.5V   -39.55  -39.23
 
     Temp = d1 + d2*SOt
 */
 /*
     SOrh       C1      C2          C3           t1      t2
-   12bit    -2.0468  0.0362   -0.0000015955    0.01   0.00008
-    8bit    -2.0468  0.5872   -0.0000040845    0.01   0.00128
+   12bit       -4    0.0405    -0.0000028      0.01   0.00008
+    8bit       -4    0.648     -0.00072        0.01   0.00128
 
     RHlinear = C1 + C2*SOrh + C3*SOrh*SOrh
     Humi     = (Temp - 25)*(t1 + t2*SOrh) + RHlinear
 */
-STATIC void _sht1x_calc_humi_temp(float *p_humidity ,float *p_temperature) {
-    const float D1 = -40.1;
+STATIC void _sht1x_calc_humi_temp(mp_obj_sht1x_t *self, float *p_humidity ,float *p_temperature) {
+    const float D1[5] = {-40.0, -39.75, -39.66, -39.6, -39.55};
     const float D2 = +0.01;
     const float C1 = -4.0;
     const float C2 = +0.0405;
@@ -333,7 +327,7 @@ STATIC void _sht1x_calc_humi_temp(float *p_humidity ,float *p_temperature) {
     float rh_true;
     float t_C;
 
-    t_C = t*D2 - D1;
+    t_C = t*D2 + D1[self->vdd_value];
     rh_lin = C3*rh*rh + C2*rh + C1;
     rh_true = (t_C-25)*(T1+T2*rh) + rh_lin;
     if (rh_true > 100) rh_true = 100;
@@ -360,15 +354,17 @@ STATIC void mp_sht1x_print(const mp_print_t *print, mp_obj_t self_in, mp_print_k
     mp_printf(print, "<SDA Mode %d> \r\n", pin_get_mode(self->pin_sda));
 
     mp_printf(print, "<Timeout(us) %d> \r\n", self->us_timeout);
+    mp_printf(print, "<Power VDD   %d> \r\n", self->vdd_value);
 }
 
 STATIC void mp_sht1x_obj_init_helper(mp_obj_sht1x_t *self, size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args)
 {
-    enum { ARG_sck, ARG_sda, ARG_timeout };
+    enum { ARG_sck, ARG_sda, ARG_timeout, ARG_vdd };
     static const mp_arg_t allowed_args[] = {
         { MP_QSTR_sck, MP_ARG_REQUIRED | MP_ARG_OBJ, {.u_obj = MP_OBJ_NULL} },
         { MP_QSTR_sda, MP_ARG_REQUIRED | MP_ARG_OBJ, {.u_obj = MP_OBJ_NULL} },
         { MP_QSTR_timeout, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 10000000} },
+        { MP_QSTR_vdd, MP_ARG_KW_ONLY  | MP_ARG_INT, {.u_int = VDD_3D0V} },
     };
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -376,13 +372,11 @@ STATIC void mp_sht1x_obj_init_helper(mp_obj_sht1x_t *self, size_t n_args, const 
     self->pin_sck = mp_hal_get_pin_obj(args[ARG_sck].u_obj);
     self->pin_sda = mp_hal_get_pin_obj(args[ARG_sda].u_obj);
     self->us_timeout = args[ARG_timeout].u_int;
+    self->vdd_value = args[ARG_vdd].u_int;
 
     // init the pins to be push/pull outputs
     mp_hal_pin_open_drain(self->pin_sck);
     mp_hal_pin_open_drain(self->pin_sda);
-
-    // mp_hal_pin_config(sht1x->pin_sck, MP_HAL_PIN_MODE_OUTPUT, MP_HAL_PIN_PULL_UP, 0);
-    // mp_hal_pin_config(sht1x->pin_sda, MP_HAL_PIN_MODE_ALT_OPEN_DRAIN, MP_HAL_PIN_PULL_NONE, 0);
 
     mp_hal_delay_ms(5);
     _sht1x_bus_connectionreset(self);
@@ -530,9 +524,6 @@ STATIC mp_obj_t sht1x_measure_humi(mp_obj_t self_in, mp_obj_t buf_in) {
     pbuf[0] = _sht1x_bus_read_byte(self, SHT1X_ACK);    //read the first byte (MSB)
     pbuf[1] = _sht1x_bus_read_byte(self, SHT1X_ACK);    //read the second byte (LSB)
 
-    pbuf[0] = 0x01;
-    pbuf[1] = 0x02;
-
     checksum   = _sht1x_bus_read_byte(self, SHT1X_NOACK);
 
     error += _sht1x_check_crc8(SHT1X_MEASURE_REG_TEMP, checksum, pbuf[0]*256 + pbuf[1]);
@@ -558,17 +549,16 @@ STATIC mp_obj_t sht1x_readinto(mp_obj_t self_in, mp_obj_t buf_in) {
     error += _sht1x_measure(self, (uint8_t *)&temp_val, TEMP);
     error += _sht1x_measure(self, (uint8_t *)&humi_val, HUMI);
 
-    float temperature = 0.0, humidity = 0.0;
-    _sht1x_calc_humi_temp(&humidity, &temperature);
+    float temperature = (float)temp_val, humidity = (float)humi_val;
+    _sht1x_calc_humi_temp(self, &humidity, &temperature);
 
     printf("Temp = %f\r\n", (double)temperature);
     printf("Humi = %f\r\n", (double)humidity);
 
-
-    ((uint8_t *)bufinfo.buf)[0] = (unsigned short)(temperature*100) & 0xFF;
-    ((uint8_t *)bufinfo.buf)[1] = (unsigned short)(temperature*100) / 256;
-    ((uint8_t *)bufinfo.buf)[2] = (unsigned short)( humidity*100  ) & 0xFF;
-    ((uint8_t *)bufinfo.buf)[3] = (unsigned short)( humidity*100  ) / 256;
+    ((uint8_t *)bufinfo.buf)[0] = (unsigned short)(temperature*100) / 256;
+    ((uint8_t *)bufinfo.buf)[1] = (unsigned short)(temperature*100) & 0xFF;
+    ((uint8_t *)bufinfo.buf)[2] = (unsigned short)( humidity*100  ) / 256;
+    ((uint8_t *)bufinfo.buf)[3] = (unsigned short)( humidity*100  ) & 0xFF;
 
     return MP_OBJ_NEW_SMALL_INT(error);
 }
@@ -591,30 +581,6 @@ STATIC mp_obj_t sht1x_dewpoint(mp_obj_t self_in, mp_obj_t temp_in, mp_obj_t humi
 }
 MP_DEFINE_CONST_FUN_OBJ_3(sht1x_dewpoint_obj, sht1x_dewpoint);
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
-// Test
-STATIC mp_obj_t sht1x_test_sda(mp_obj_t self_in, mp_obj_t value_in, mp_obj_t time_in) { 
-    
-    uint8_t error = 0;
-    mp_int_t value = mp_obj_get_int(value_in);
-    mp_int_t delay = mp_obj_get_int(time_in);
-    mp_obj_sht1x_t *self = MP_OBJ_TO_PTR(self_in);
-
-    if (value > 0) {
-        mp_hal_sht1x_sda_high(self);
-    } else {
-        mp_hal_sht1x_sda_low(self);
-    }
-
-    mp_hal_delay_us_fast(delay);
-    error = mp_hal_sht1x_sda_read(self);
-
-    return MP_OBJ_NEW_SMALL_INT(error);
-}
-STATIC MP_DEFINE_CONST_FUN_OBJ_3(sht1x_test_sda_obj, sht1x_test_sda);
-///////////////////////////////////////////////////////////////////////////////////////////////////
-
-
 STATIC const mp_rom_map_elem_t sht1x_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_reset), MP_ROM_PTR(&sht1x_softreset_obj) },
     { MP_ROM_QSTR(MP_QSTR_readreg),  MP_ROM_PTR(&sht1x_read_statusreg_obj) },
@@ -625,8 +591,6 @@ STATIC const mp_rom_map_elem_t sht1x_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_readinto), MP_ROM_PTR(&sht1x_readinto_obj) },
 
     { MP_ROM_QSTR(MP_QSTR_dewpoint), MP_ROM_PTR(&sht1x_dewpoint_obj) },
-
-    { MP_ROM_QSTR(MP_QSTR_sda), MP_ROM_PTR(&sht1x_test_sda_obj) },
 };
 
 STATIC MP_DEFINE_CONST_DICT(sht1x_locals_dict, sht1x_locals_dict_table);
@@ -639,13 +603,20 @@ STATIC const mp_obj_type_t mp_type_sht1x = {
     .locals_dict = (mp_obj_dict_t*)&sht1x_locals_dict,
 };
 
-
 STATIC const mp_rom_map_elem_t sht1x_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_sht1x) },
     { MP_ROM_QSTR(MP_QSTR_init), MP_ROM_PTR(&mp_type_sht1x) },
     
-    { MP_ROM_QSTR(MP_QSTR_T08H12BIT), MP_ROM_INT(TEMP_8BIT_HUMI_12BIT) },
-    { MP_ROM_QSTR(MP_QSTR_T12H14BIT), MP_ROM_INT(TEMP_12BIT_HUMI_14BIT) },
+    { MP_ROM_QSTR(MP_QSTR_TEMP_14BIT), MP_ROM_INT(TEMP_14BIT) },
+    { MP_ROM_QSTR(MP_QSTR_TEMP_12BIT), MP_ROM_INT(TEMP_12BIT) },
+    { MP_ROM_QSTR(MP_QSTR_HUMI_12BIT), MP_ROM_INT(HUMI_12BIT) },
+    { MP_ROM_QSTR(MP_QSTR_HUMI_8BIT), MP_ROM_INT(HUMI_8BIT) },
+
+    { MP_ROM_QSTR(MP_QSTR_VDD5V), MP_ROM_INT(VDD_5D0V) },
+    { MP_ROM_QSTR(MP_QSTR_VDD4V), MP_ROM_INT(VDD_4D0V) },
+    { MP_ROM_QSTR(MP_QSTR_VDD3D5V), MP_ROM_INT(VDD_3D5V) },
+    { MP_ROM_QSTR(MP_QSTR_VDD3V), MP_ROM_INT(VDD_3D0V) },
+    { MP_ROM_QSTR(MP_QSTR_VDD2D5V), MP_ROM_INT(VDD_2D5V) },
 };
 
 STATIC MP_DEFINE_CONST_DICT(sht1x_module_globals, sht1x_module_globals_table);
