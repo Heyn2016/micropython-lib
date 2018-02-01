@@ -345,13 +345,14 @@ STATIC void mp_sht1x_print(const mp_print_t *print, mp_obj_t self_in, mp_print_k
     mp_obj_sht1x_t *self = self_in;
     (void)kind;
 
-    mp_printf(print, "<SCK Port %d> \r\n", self->pin_sck->port);
-    mp_printf(print, "<SCK Pin  %d> \r\n", self->pin_sck->pin);
-    mp_printf(print, "<SCK Mode %d> \r\n", pin_get_mode(self->pin_sck));
+    // ESP8266 build faild error: invalid type argument of '->' (have 'uint32_t')
+    // mp_printf(print, "<SCK Port %d> \r\n", self->pin_sck->port);
+    // mp_printf(print, "<SCK Pin  %d> \r\n", self->pin_sck->pin);
+    // mp_printf(print, "<SCK Mode %d> \r\n", pin_get_mode(self->pin_sck));
 
-    mp_printf(print, "<SDA Port %d> \r\n", self->pin_sda->port);
-    mp_printf(print, "<SDA Pin  %d> \r\n", self->pin_sda->pin);
-    mp_printf(print, "<SDA Mode %d> \r\n", pin_get_mode(self->pin_sda));
+    // mp_printf(print, "<SDA Port %d> \r\n", self->pin_sda->port);
+    // mp_printf(print, "<SDA Pin  %d> \r\n", self->pin_sda->pin);
+    // mp_printf(print, "<SDA Mode %d> \r\n", pin_get_mode(self->pin_sda));
 
     mp_printf(print, "<Timeout(us) %d> \r\n", self->us_timeout);
     mp_printf(print, "<Power VDD   %d> \r\n", self->vdd_value);
